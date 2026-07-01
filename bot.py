@@ -1,27 +1,120 @@
-import logging
+import os
 import io
+import base64
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-from config import Config
-import utils
+# ==================== CONFIGURATION ====================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("No BOT_TOKEN found in environment variables.")
 
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=Config.LOG_LEVEL
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- User State Management ---
-user_sessions = {}  # Dictionary to track user states: {user_id: {'mode': 'encode'/'decode', 'action': 'text'/'file'}}
+# ==================== USER STATE MANAGEMENT ====================
+user_sessions = {}
 
-# --- Command Handlers ---
+# ==================== KEYBOARD FUNCTIONS ====================
+def get_mode_keyboard():
+    """Returns the inline keyboard for mode selection."""
+    keyboard = [
+        [
+            InlineKeyboardButton("📝 Encode to Base64", callback_data="mode_encode"),
+            InlineKeyboardButton("🔓 Decode from Base64", callback_data="mode_decode"),
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_action_keyboard(action_type):
+    """Returns the appropriate action keyboard."""
+    if action_type == "encode":
+        keyboard = [
+            [
+                InlineKeyboardButton("📝 Encode Text", callback_data="action_encode_text"),
+                InlineKeyboardButton("📎 Encode File", callback_data="action_encode_file"),
+            ],
+            [InlineKeyboardButton("🔙 Back to Modes", callback_data="back_to_modes")],
+        ]
+    else:  # decode
+        keyboard = [
+            [
+                InlineKeyboardButton("📝 Decode Text", callback_data="action_decode_text"),
+                InlineKeyboardButton("📎 Decode File", callback_data="action_decode_file"),
+            ],
+            [InlineKeyboardButton("🔙 Back to Modes", callback_data="back_to_modes")],
+        ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_back_to_start_keyboard():
+    """Keyboard to go back to the start menu."""
+    keyboard = [[InlineKeyboardButton("🏠 Back to Start", callback_data="back_to_start")]]
+    return InlineKeyboardMarkup(keyboard)
+
+# ==================== BASE64 FUNCTIONS ====================
+def encode_text(text):
+    """Encodes a text string to Base64."""
+    try:
+        text_bytes = text.encode('utf-8')
+        encoded_bytes = base64.b64encode(text_bytes)
+        return encoded_bytes.decode('utf-8'), None
+    except Exception as e:
+        return None, f"Error encoding text: {str(e)}"
+
+def decode_text(encoded_text):
+    """Decodes a Base64 string back to text."""
+    try:
+        decoded_bytes = base64.b64decode(encoded_text)
+        decoded_text = decoded_bytes.decode('utf-8')
+        return decoded_text, None
+    except UnicodeDecodeError:
+        try:
+            decoded_bytes = base64.b64decode(encoded_text)
+            return decoded_bytes, "binary"
+        except Exception as e:
+            return None, f"Error decoding Base64: {str(e)}"
+    except Exception as e:
+        return None, f"Error decoding Base64: {str(e)}"
+
+def encode_file(file_bytes):
+    """Encodes file bytes to Base64."""
+    try:
+        encoded_bytes = base64.b64encode(file_bytes)
+        return encoded_bytes.decode('utf-8'), None
+    except Exception as e:
+        return None, f"Error encoding file: {str(e)}"
+
+def decode_file(encoded_text):
+    """Decodes Base64 string back to bytes for file reconstruction."""
+    try:
+        decoded_bytes = base64.b64decode(encoded_text)
+        return decoded_bytes, None
+    except Exception as e:
+        return None, f"Error decoding Base64 for file: {str(e)}"
+
+def is_base64_image(encoded_text):
+    """Checks if the encoded text might represent an image."""
+    try:
+        decoded = base64.b64decode(encoded_text[:50])
+        if (decoded.startswith(b'\x89PNG') or 
+            decoded.startswith(b'\xff\xd8\xff') or 
+            decoded.startswith(b'GIF87a') or 
+            decoded.startswith(b'GIF89a')):
+            return True
+    except:
+        pass
+    return False
+
+# ==================== COMMAND HANDLERS ====================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /start command."""
     user = update.effective_user
     user_id = user.id
-    # Reset user session
     user_sessions[user_id] = {}
 
     welcome_text = (
@@ -35,7 +128,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         welcome_text,
         parse_mode='Markdown',
-        reply_markup=utils.get_mode_keyboard()
+        reply_markup=get_mode_keyboard()
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -55,7 +148,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **Tips:**
 • For decoding, you can send a Base64 string or a `.txt` file containing it.
-• The bot will try to detect if a decoded Base64 string is an image and show a preview.
+• The bot will try to detect if a decoded Base64 string is an image.
 • Maximum file size is determined by Telegram (usually 50MB for files).
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -87,10 +180,10 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_sessions[user_id]
     await update.message.reply_text(
         "🔄 Operation cancelled. Use /start to begin again.",
-        reply_markup=utils.get_mode_keyboard()
+        reply_markup=get_mode_keyboard()
     )
 
-# --- Callback Query Handlers ---
+# ==================== CALLBACK QUERY HANDLERS ====================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles all button callback queries."""
     query = update.callback_query
@@ -102,14 +195,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_sessions[user_id] = {}
         await query.edit_message_text(
             "🔄 Returning to main menu. Choose an option:",
-            reply_markup=utils.get_mode_keyboard()
+            reply_markup=get_mode_keyboard()
         )
         return
 
     if data == "back_to_modes":
         await query.edit_message_text(
             "🔄 Choose an action:",
-            reply_markup=utils.get_mode_keyboard()
+            reply_markup=get_mode_keyboard()
         )
         return
 
@@ -119,7 +212,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📝 **Encode Mode**\n\n"
             "What would you like to encode?",
             parse_mode='Markdown',
-            reply_markup=utils.get_action_keyboard('encode')
+            reply_markup=get_action_keyboard('encode')
         )
         return
 
@@ -129,7 +222,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔓 **Decode Mode**\n\n"
             "What would you like to decode?",
             parse_mode='Markdown',
-            reply_markup=utils.get_action_keyboard('decode')
+            reply_markup=get_action_keyboard('decode')
         )
         return
 
@@ -140,7 +233,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please send me the text you want to encode to Base64.\n"
             "Type or paste your text below:",
             parse_mode='Markdown',
-            reply_markup=utils.get_back_to_start_keyboard()
+            reply_markup=get_back_to_start_keyboard()
         )
         return
 
@@ -151,7 +244,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please send me the Base64 string you want to decode.\n"
             "Type or paste the Base64 string below:",
             parse_mode='Markdown',
-            reply_markup=utils.get_back_to_start_keyboard()
+            reply_markup=get_back_to_start_keyboard()
         )
         return
 
@@ -162,7 +255,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please upload the file you want to encode to Base64.\n"
             "I accept any file type (images, PDFs, documents, etc.).",
             parse_mode='Markdown',
-            reply_markup=utils.get_back_to_start_keyboard()
+            reply_markup=get_back_to_start_keyboard()
         )
         return
 
@@ -173,14 +266,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please upload a `.txt` file containing the Base64 string.\n"
             "I will decode it and attempt to reconstruct the original file.",
             parse_mode='Markdown',
-            reply_markup=utils.get_back_to_start_keyboard()
+            reply_markup=get_back_to_start_keyboard()
         )
         return
 
-    # Default response
     await query.edit_message_text("Unknown option. Please use /start to restart.")
 
-# --- Message Handlers ---
+# ==================== MESSAGE HANDLERS ====================
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles text messages based on the user's current state."""
     user_id = update.effective_user.id
@@ -189,7 +281,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if user_id not in user_sessions:
         await update.message.reply_text(
             "🚀 Let's start! Use /start to begin.",
-            reply_markup=utils.get_mode_keyboard()
+            reply_markup=get_mode_keyboard()
         )
         return
 
@@ -197,26 +289,24 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     action = user_state.get('action')
 
     if action == 'encode_text':
-        result, error = utils.encode_text(text)
+        result, error = encode_text(text)
         if error:
             await update.message.reply_text(f"❌ {error}\n\nPlease try again or /cancel.")
         else:
-            # Send the result in a code block
             await update.message.reply_text(
                 f"✅ **Encoded Text (Base64):**\n\n"
                 f"`{result}`\n\n"
                 f"📋 Copy the string above.",
                 parse_mode='Markdown'
             )
-        # Reset action to avoid accidental re-processing
         user_sessions[user_id]['action'] = None
         await update.message.reply_text(
             "🔁 What would you like to do next?",
-            reply_markup=utils.get_mode_keyboard()
+            reply_markup=get_mode_keyboard()
         )
 
     elif action == 'decode_text':
-        result, error = utils.decode_text(text)
+        result, error = decode_text(text)
         if error:
             await update.message.reply_text(f"❌ {error}\n\nPlease check your Base64 string and try again.")
         elif result == "binary":
@@ -225,13 +315,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Try decoding it as a file instead."
             )
         else:
-            # Check if the decoded text might be an image (data URL)
-            if text.startswith('data:image') or utils.is_base64_image(text):
-                # For simplicity, we'll just show a note. We could implement image preview by decoding bytes.
+            if is_base64_image(text):
                 await update.message.reply_text(
                     f"✅ **Decoded Text:**\n\n"
                     f"`{result}`\n\n"
-                    f"💡 *Note: Your Base64 seems to represent an image. For preview, try decoding as a file.*",
+                    f"💡 *Note: Your Base64 seems to represent an image.*",
                     parse_mode='Markdown'
                 )
             else:
@@ -240,11 +328,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     f"`{result}`",
                     parse_mode='Markdown'
                 )
-        # Reset action
         user_sessions[user_id]['action'] = None
         await update.message.reply_text(
             "🔁 What would you like to do next?",
-            reply_markup=utils.get_mode_keyboard()
+            reply_markup=get_mode_keyboard()
         )
 
     else:
@@ -258,12 +345,10 @@ async def handle_file_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     file = None
     file_name = "file"
 
-    # Get the file object
     if update.message.document:
         file = update.message.document
         file_name = file.file_name or "document"
     elif update.message.photo:
-        # Handle photo - get the largest size
         file = update.message.photo[-1]
         file_name = "image.jpg"
     else:
@@ -279,17 +364,13 @@ async def handle_file_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if action == 'encode_file':
         try:
-            # Download the file
             file_obj = await context.bot.get_file(file.file_id)
             file_bytes = await file_obj.download_as_bytearray()
-
-            # Encode to Base64
-            encoded_result, error = utils.encode_file(bytes(file_bytes))
+            encoded_result, error = encode_file(bytes(file_bytes))
             if error:
                 await update.message.reply_text(f"❌ {error}")
                 return
 
-            # Send the result as a text file to avoid overwhelming the chat
             filename = f"{file_name}.base64.txt"
             await update.message.reply_document(
                 document=io.BytesIO(encoded_result.encode('utf-8')),
@@ -300,15 +381,13 @@ async def handle_file_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"Error processing file: {str(e)}")
             await update.message.reply_text(f"❌ Error processing file: {str(e)}")
 
-        # Reset action
         user_sessions[user_id]['action'] = None
         await update.message.reply_text(
             "🔁 What would you like to do next?",
-            reply_markup=utils.get_mode_keyboard()
+            reply_markup=get_mode_keyboard()
         )
 
     elif action == 'decode_file':
-        # Decoding a file - we expect a .txt file containing the Base64 string
         if not file_name.endswith('.txt') and file.mime_type != 'text/plain':
             await update.message.reply_text(
                 "⚠️ For decoding, please send a `.txt` file containing the Base64 string."
@@ -316,21 +395,16 @@ async def handle_file_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         try:
-            # Download the file content
             file_obj = await context.bot.get_file(file.file_id)
             file_content = await file_obj.download_as_bytearray()
             base64_string = file_content.decode('utf-8').strip()
 
-            # Decode the Base64
-            decoded_bytes, error = utils.decode_file(base64_string)
+            decoded_bytes, error = decode_file(base64_string)
             if error:
                 await update.message.reply_text(f"❌ {error}")
                 return
 
-            # Try to determine file type and send it back
-            # We'll send it as a generic file; user can rename it
             response_filename = "decoded_file.bin"
-            # Basic check for image headers to suggest a name
             if decoded_bytes.startswith(b'\x89PNG'):
                 response_filename = "decoded_image.png"
             elif decoded_bytes.startswith(b'\xff\xd8\xff'):
@@ -338,7 +412,6 @@ async def handle_file_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             elif decoded_bytes.startswith(b'GIF87a') or decoded_bytes.startswith(b'GIF89a'):
                 response_filename = "decoded_image.gif"
 
-            # Send the decoded file
             await update.message.reply_document(
                 document=io.BytesIO(decoded_bytes),
                 filename=response_filename,
@@ -349,25 +422,23 @@ async def handle_file_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"Error decoding file: {str(e)}")
             await update.message.reply_text(f"❌ Error decoding file: {str(e)}")
 
-        # Reset action
         user_sessions[user_id]['action'] = None
         await update.message.reply_text(
             "🔁 What would you like to do next?",
-            reply_markup=utils.get_mode_keyboard()
+            reply_markup=get_mode_keyboard()
         )
 
     else:
-        # If the user hasn't selected a specific action, ask them what to do
         await update.message.reply_text(
             "📎 I see you sent a file. Use /start to choose a mode first."
         )
 
+# ==================== MAIN FUNCTION ====================
 def main():
     """Start the bot."""
     logger.info("Starting Base64 Encoder/Decoder Bot...")
 
-    # Create the Application
-    application = ApplicationBuilder().token(Config.BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -375,14 +446,13 @@ def main():
     application.add_handler(CommandHandler("about", about_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
 
-    # Add callback query handler for all button presses
+    # Add callback query handler
     application.add_handler(CallbackQueryHandler(button_handler))
 
     # Add message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file_message))
 
-    # Start the bot
     logger.info("Bot is running and polling for updates...")
     application.run_polling()
 
